@@ -5,5 +5,5 @@ module.exports = {
   MAX_OUTPUT_TOKENS: env.MAX_TOKENS,
   TEMPERATURE: 0.7,
   TIMEOUT_MS: env.TIMEOUT_MS,
-  FALLBACK_MODEL: 'gemini-2.0-flash-lite',
+  FALLBACK_MODEL: 'gpt-4o-mini',
 };

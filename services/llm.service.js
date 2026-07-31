@@ -1,4 +1,3 @@
-const { GoogleGenAI } = require('@google/genai');
 const { env } = require('../config/env');
 const { DEFAULT_MODEL, MAX_OUTPUT_TOKENS, TEMPERATURE, TIMEOUT_MS, FALLBACK_MODEL } = require('../config/ai');
 const { sanitizeMessages, sanitizeText } = require('../utils/sanitizer');
@@ -8,18 +7,69 @@ const { buildPrompt } = require('./prompt.service');
 const { humanizeResponse } = require('./response.service');
 const { waitForTyping } = require('./typing.service');
 
-function createGeminiClient() {
-  const apiKey = env.GEMINI_API_KEY?.trim();
+function createOpenRouterClient() {
+  const apiKey = env.OPENROUTER_API_KEY?.trim() || env.GEMINI_API_KEY?.trim();
   if (!apiKey) {
     return null;
   }
 
-  try {
-    return new GoogleGenAI({ apiKey });
-  } catch (error) {
-    console.error('Gemini client initialization failed', error);
-    return null;
-  }
+  return {
+    models: {
+      generateContent: async ({ model, contents, config }) => {
+        const messages = [];
+
+        if (config?.systemInstruction) {
+          messages.push({ role: 'system', content: config.systemInstruction });
+        }
+
+        for (const content of contents) {
+          const text = content.parts?.map((p) => p.text).join('\n') || '';
+          messages.push({ role: content.role || 'user', content: text });
+        }
+
+        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://human-chatbot.local',
+            'X-Title': 'Human Chatbot',
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            temperature: config?.temperature ?? 0.7,
+            max_tokens: config?.maxOutputTokens ?? 220,
+          }),
+        });
+
+        if (!response.ok) {
+          let errorMessage = `OpenRouter API error: ${response.status} ${response.statusText}`;
+          try {
+            const errorData = await response.json();
+            errorMessage = errorData.error?.message || errorMessage;
+          } catch {
+            // ignore JSON parse errors
+          }
+          const error = new Error(errorMessage);
+          error.status = response.status;
+          throw error;
+        }
+
+        const data = await response.json();
+        const text = data.choices?.[0]?.message?.content || '';
+
+        return {
+          text,
+          candidates: data.choices?.map((choice) => ({
+            content: {
+              parts: [{ text: choice.message?.content || '' }],
+            },
+          })),
+        };
+      },
+    },
+  };
 }
 
 function analyzeConversation(messages) {
@@ -132,7 +182,7 @@ async function generateChatCompletion({ model = DEFAULT_MODEL, messages = [], st
     ],
   });
 
-  const provider = createGeminiClient();
+  const provider = createOpenRouterClient();
   const finalMessages = trimmedMessages.map((message) => `${message.role}: ${message.content}`).join('\n');
   const content = `${prompt}\n\nConversation:\n${finalMessages}`;
 
@@ -153,7 +203,7 @@ async function generateChatCompletion({ model = DEFAULT_MODEL, messages = [], st
               systemInstruction: prompt,
             },
           }),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Gemini timeout')), TIMEOUT_MS)),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('LLM provider timeout')), TIMEOUT_MS)),
         ]);
 
         rawText = extractTextFromResponse(response);
@@ -163,9 +213,9 @@ async function generateChatCompletion({ model = DEFAULT_MODEL, messages = [], st
       } catch (error) {
         if (candidateModel === FALLBACK_MODEL || !isModelUnavailableError(error)) {
           if (isRecoverableProviderError(error) || isModelUnavailableError(error)) {
-            console.warn('Gemini unavailable, using local fallback response.');
+            console.warn('LLM provider unavailable, using local fallback response.');
           } else {
-            console.error('Gemini generation failed', error.message || error);
+            console.error('LLM provider generation failed', error.message || error);
           }
           break;
         }
